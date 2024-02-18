@@ -1,6 +1,6 @@
 ###############################################################################
 # nss-rk.qos (HW Accelerated Simple Traffic Shaper)
-# version 20230320a
+# version 20240218
 #
 # sqm script to use the NSS accelerated nssfq_codel qdisc
 #
@@ -14,11 +14,12 @@
 # To use it, select fq_codel as a queue discipline in (l)uci and nss.qos
 # for the script.
 #
-# Works on my machine (R7800 with OpenWRT master kernel 5.15) certified.
-#
 # Original can be found at https://github.com/rickkdotnet/sqm-scripts-nss
+# Modified version for ipq807x can found at https://github.com/qosmio/sqm-scripts-nss
 #
 ################################################################################
+
+. /lib/functions.sh
 
 . ${SQM_LIB_DIR}/defaults.sh
 
@@ -80,6 +81,18 @@ else
    sqm_debug "Kernel version 5.10 found, will not delete nssifb on reload/stop"
 fi
 
+check_wan() {
+  local wan_ip
+  # use ubus to check for WAN IP
+  wan_ip=$(ubus call network.interface.wan status | jsonfilter -e '@["ipv4-address"][0].address')
+  if [ -z "$wan_ip" ]; then
+    sqm_debug "check_wan: NO IP on WAN. Sleeping 5 seconds..."
+    sleep 5
+    check_wan
+  else
+    sqm_debug "check_wan: IP on WAN: $wan_ip"
+  fi
+}
 
 calc_limit() {
   [ -z ${MINLIMIT} ] && MINLIMIT=200
@@ -269,7 +282,7 @@ ingress() {
   sqm_debug "ingress: Enabling the $DEV ifb interface.." || (sqm_error "ingress: failed to enable $DEV interface" && return 1)
   $IP link set up $DEV || return 1
 
-   return 0
+  return 0
 }
 
 # load modules and create nssifb interface if needed
@@ -278,7 +291,7 @@ sqm_prepare_script() {
     # load it here if it's not loaded, so we can keep all NSS changes together in this script
     if [ ! -d /sys/module/nss_ifb ]; then
       sqm_log "sqm_prepare_script: required nss_ifb kernel module not detected, loading it now.. "
-	    insmod nss-ifb 2>>${OUTPUT_TARGET} || (sqm_error "Kernel module failed to load" && return 1)
+      insmod nss-ifb 2>>${OUTPUT_TARGET} || (sqm_error "Kernel module failed to load" && return 1)
     fi
 
     # This in theory allows you to change the device the ifb is active on. Not tested.
@@ -307,6 +320,8 @@ sqm_start() {
 
     # reset the iptables trace log
     ipt_log_restart
+
+    check_wan
 
     sqm_prepare_script
 
@@ -369,6 +384,4 @@ sqm_stop() {
 
     return 0
 }
-
-
-
+# vim: syntax=sh ts=4 sw=4 sts=4

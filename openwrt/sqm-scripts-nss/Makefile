@@ -1,14 +1,14 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=sqm-scripts-nss
-PKG_VERSION:=20230320a
+PKG_VERSION:=20240218
 PKG_RELEASE:=1
 
 include $(INCLUDE_DIR)/package.mk
 
 define Package/sqm-scripts-nss
   SECTION:=net
-  DEPENDS:=+sqm-scripts +kmod-qca-nss-drv-qdisc
+  DEPENDS:=+sqm-scripts +kmod-qca-nss-drv-qdisc +kmod-qca-nss-drv-igs
   PKGARCH:=all
   CATEGORY:=Base system
   TITLE:=SQM Scripts (QoS for NSS)
