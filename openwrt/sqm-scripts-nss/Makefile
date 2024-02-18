@@ -1,22 +1,23 @@
 include $(TOPDIR)/rules.mk
- 
+
 PKG_NAME:=sqm-scripts-nss
 PKG_VERSION:=20230320a
 PKG_RELEASE:=1
- 
+
 include $(INCLUDE_DIR)/package.mk
- 
+
 define Package/sqm-scripts-nss
-  TITLE:=SQM scripts for NSS enabled builds
-  DEPENDS:=+sqm-scripts
+  SECTION:=net
+  DEPENDS:=+sqm-scripts +kmod-qca-nss-drv-qdisc
   PKGARCH:=all
-  SECTION:=base
+  CATEGORY:=Base system
+  TITLE:=SQM Scripts (QoS for NSS)
 endef
- 
+
 define Package/sqm-scripts-nss/description
   Smart Queue Management Scripts for OpenWRT for use with NSS enabled builds.
 endef
- 
+
 define Build/Configure
 endef
 
@@ -29,8 +30,8 @@ define Build/Prepare
 endef
 
 define Package/sqm-scripts-nss/install
-        $(INSTALL_DIR) $(1)
-				$(CP) $(PKG_BUILD_DIR)/files/* $(1)/
+	$(INSTALL_DIR) $(1)
+	$(CP) $(PKG_BUILD_DIR)/files/* $(1)/
 endef
- 
+
 $(eval $(call BuildPackage,sqm-scripts-nss))
