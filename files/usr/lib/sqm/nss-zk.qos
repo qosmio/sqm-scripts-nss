@@ -315,18 +315,20 @@ sqm_start() {
 
 sqm_stop() {
 
-  # Deleting from 'root' causes annoying errors in `nss_qdisc_stats_qdisc_detach`. Clean up nested rules prior to
-  # deleting from root
-  tc qdisc list dev $IFACE | awk '$1=="qdisc"&&$4=="parent"{print $5}' | sort -t: -k1nr,2nr | while read -r parent; do
-    $TC qdisc del dev $IFACE parent $parent
-  done
+  if [ -r /sys/devices/virtual/net/$IFACE ]; then
+    # Deleting from 'root' causes annoying errors in `nss_qdisc_stats_qdisc_detach`. Clean up nested rules prior to
+    # deleting from root
+    tc qdisc list dev $IFACE | awk '$1=="qdisc"&&$4=="parent"{print $5}' | sort -t: -k1nr,2nr | while read -r parent; do
+      $TC qdisc del dev $IFACE parent $parent
+    done
 
-  if [ "$(tc qdisc show dev $IFACE root 2>&1 | awk -F':| ' 'NR==1{print $3}')" -gt 0 ]; then
-    $TC qdisc del dev $IFACE root
-  fi
+    if [ "$(tc qdisc show dev $IFACE root 2>&1 | awk -F':| ' 'NR==1{print $3}')" -gt 0 ]; then
+      $TC qdisc del dev $IFACE root
+    fi
 
-  if tc qdisc show dev $IFACE 2>&1 | awk '$2=="ingress"{print}' | grep -q .; then
-    $TC qdisc del dev $IFACE ingress
+    if tc qdisc show dev $IFACE 2>&1 | awk '$2=="ingress"{print}' | grep -q .; then
+      $TC qdisc del dev $IFACE ingress
+    fi
   fi
 
   tc qdisc list dev $DEV | awk '$1=="qdisc"&&$4=="parent"{print $5}' | sort -t: -k1nr,2nr | while read -r parent; do
