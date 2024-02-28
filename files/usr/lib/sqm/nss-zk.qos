@@ -315,7 +315,6 @@ sqm_start() {
 
 sqm_stop() {
 
-  if [ -r /sys/devices/virtual/net/$IFACE ]; then
     # Deleting from 'root' causes annoying errors in `nss_qdisc_stats_qdisc_detach`. Clean up nested rules prior to
     # deleting from root
     tc qdisc list dev $IFACE | awk '$1=="qdisc"&&$4=="parent"{print $5}' | sort -t: -k1nr,2nr | while read -r parent; do
@@ -329,19 +328,20 @@ sqm_stop() {
     if tc qdisc show dev $IFACE 2>&1 | awk '$2=="ingress"{print}' | grep -q .; then
       $TC qdisc del dev $IFACE ingress
     fi
+
+  if [ -r /sys/devices/virtual/net/$DEV ]; then
+    tc qdisc list dev $DEV | awk '$1=="qdisc"&&$4=="parent"{print $5}' | sort -t: -k1nr,2nr | while read -r parent; do
+      $TC qdisc del dev $DEV parent $parent
+    done
+
+    if [ "$(tc qdisc show dev $DEV root 2>&1 | awk -F':| ' 'NR==1{print $3}')" -gt 0 ]; then
+      $TC qdisc del dev $DEV root
+    fi
+
+    $IP link set dev $DEV down
+
+    $IP link del $DEV type ifb
   fi
-
-  tc qdisc list dev $DEV | awk '$1=="qdisc"&&$4=="parent"{print $5}' | sort -t: -k1nr,2nr | while read -r parent; do
-    $TC qdisc del dev $DEV parent $parent
-  done
-
-  if [ "$(tc qdisc show dev $DEV root 2>&1 | awk -F':| ' 'NR==1{print $3}')" -gt 0 ]; then
-    $TC qdisc del dev $DEV root
-  fi
-
-  $IP link set dev $DEV down
-
-  $IP link del $DEV type ifb
 
   for module in act_nssmirred qca_nss_qdisc act_mirred ifb; do
     if [ -d /sys/module/$module ]; then
