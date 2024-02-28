@@ -109,6 +109,45 @@ get_ecn() {
   echo "$CURECN"
 }
 
+# Sets up the NSS TBL (token bucket limiter) shaper
+add_nsstbl() {
+  local IFACE SPEED BURST_US MTU ECN LOGT
+
+  IF=$1
+  SPEED=$2
+  BURST_US=$3
+  MTU=$4
+  ECN=$5
+  LOGT="add_nsstbl $IF:"
+
+  sqm_debug "$LOGT interface:$IF speed:$SPEED burst:$BURST_US mtu:$MTU overhead:$OVERHEAD"
+
+  # BURST
+  #
+  # burst is a tradeoff between cpu load and strictness of the shaper
+  # effects are pretty minimal either way with NSS, the SQM scripts default of 1000us
+  # seems to be a good sweet spot and counter-intuitively appears a bit more stable
+  # in both throughput and latency than a minimimal burst
+
+  BURST=$(get_burst ${MTU} ${SPEED} ${BURST_US})
+  # round to nearest multiple of MTU.
+  BURST=$(echo ${BURST} | awk -v MTU=$MTU '{print sprintf("%.0f",$0/MTU)*MTU}')
+
+  SPEED100=$((SPEED / 10))
+  SPEED200=$((SPEED * 4 / 10))
+  BURST100=$((BURST / 10))
+  BURST200=$((BURST * 3 / 10))
+
+  $TC qdisc add dev $IF root handle 1: nsstbl rate "${SPEED}"kbit burst "$BURST" mtu "$MTU" accel_mode 0
+  $TC qdisc add dev $IF parent 1: handle 10: nssprio bands 3 accel_mode 0
+  $TC qdisc add dev $IF parent 10:1 handle 100: nsstbl rate "${SPEED100}"kbit burst $BURST100 accel_mode 0
+  $TC qdisc add dev $IF parent 100: handle 1000: nsspfifo limit 100 accel_mode 0
+  $TC qdisc add dev $IF parent 10:2 handle 200: nsstbl rate "${SPEED200}"kbit burst $BURST200 accel_mode 0
+  $TC qdisc add dev $IF parent 200: handle 2000: nssred limit 100k min 30k max 80k avpkt 1k burst 55 $(get_ecn ${ECN}) probability 0.50 accel_mode 0
+
+  return 0
+}
+
 # Sets up the NSS fq_codel qdisc
 add_nssfq_codel() {
 
@@ -196,20 +235,8 @@ egress() {
   # If there's no queue limit configured, calculate one
   [ -z "$ELIMIT" ] && ELIMIT=$(calc_limit ${UPLINK} ${MTU} ${MAXQLIMIT_MS})
 
-  BURST=$(get_burst "${MTU:-1514}" "$UPLINK" "$ESHAPER_BURST_DUR_US")
-  BURST=${BURST:-1514}
-  UPLINK100=$((UPLINK / 10))
-  UPLINK200=$((UPLINK * 4 / 10))
-  BURST100=$((BURST / 10))
-  BURST200=$((BURST * 3 / 10))
+  add_nsstbl ${IFACE} ${UPLINK} ${ESHAPER_BURST_DUR_US} ${MTU} ${EECN} || { sqm_error "egress: failed to add shaper"; return 1; }
 
-  $TC qdisc add dev $IFACE root handle 1: nsstbl rate "${UPLINK}"kbit burst "$BURST" mtu "$MTU" accel_mode 0
-  $TC qdisc add dev $IFACE parent 1: handle 10: nssprio bands 3 accel_mode 0
-  $TC qdisc add dev $IFACE parent 10:1 handle 100: nsstbl rate ${UPLINK100}kbit burst $BURST100 accel_mode 0
-  $TC qdisc add dev $IFACE parent 100: handle 1000: nsspfifo limit 100 accel_mode 0
-  $TC qdisc add dev $IFACE parent 10:2 handle 200: nsstbl rate ${UPLINK200}kbit burst $BURST200 accel_mode 0
-  # shellcheck disable=2046
-  $TC qdisc add dev $IFACE parent 200: handle 2000: nssred limit 100k min 30k max 80k avpkt 1k burst 55 $(get_ecn "$EECN") probability 0.50 accel_mode 0
   # shellcheck disable=2153
   add_nssfq_codel ${IFACE} ${UPLINK} ${ETARGET} ${ELIMIT} ${MTU} "${EQDISC_OPTS}" || {
     sqm_error "egress: failed to add qdisc"
@@ -232,25 +259,13 @@ ingress() {
   # If there's no queue limit configured, calculate one
   [ -z "$ILIMIT" ] && ILIMIT=$(calc_limit ${DOWNLINK} ${MTU} ${MAXQLIMIT_MS})
 
-  BURST=$(get_burst "${MTU:-1514}" "$DOWNLINK" "$ISHAPER_BURST_DUR_US")
-  BURST=${BURST:-1514}
-  DOWNLINK100=$((DOWNLINK / 10))
-  DOWNLINK200=$((DOWNLINK * 4 / 10))
-  BURST100=$((BURST / 10))
-  BURST200=$((BURST * 3 / 10))
-
   $IP link add name $DEV type ifb
   $IP link set dev $DEV up
 
   $TC qdisc add dev $IFACE handle ffff: ingress
   $TC filter add dev $IFACE parent ffff: protocol all u32 match u32 0 0 action nssmirred redirect dev $DEV fromdev $IFACE
-  $TC qdisc add dev $DEV root handle 1: nsstbl rate "${DOWNLINK}"kbit burst "$BURST" mtu "$MTU" accel_mode 0
-  $TC qdisc add dev $DEV parent 1: handle 10: nssprio bands 3 accel_mode 0
-  $TC qdisc add dev $DEV parent 10:1 handle 100: nsstbl rate "${DOWNLINK100}"kbit burst $BURST100 accel_mode 0
-  $TC qdisc add dev $DEV parent 100: handle 1000: nsspfifo limit 100 accel_mode 0
-  $TC qdisc add dev $DEV parent 10:2 handle 200: nsstbl rate "${DOWNLINK200}"kbit burst $BURST200 accel_mode 0
-  # shellcheck disable=2046
-  $TC qdisc add dev $DEV parent 200: handle 2000: nssred limit 100k min 30k max 80k avpkt 1k burst 55 $(get_ecn ${IECN}) probability 0.50 accel_mode 0
+
+  add_nsstbl ${DEV} ${DOWNLINK} ${ISHAPER_BURST_DUR_US} ${MTU} ${IECN} || { sqm_error "ingress: failed to add shaper" ; return 1; }
 
   # shellcheck disable=2153
   add_nssfq_codel ${DEV} ${DOWNLINK} ${ITARGET} ${ILIMIT} ${MTU} "${IQDISC_OPTS}" || {
