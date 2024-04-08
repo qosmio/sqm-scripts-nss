@@ -138,6 +138,10 @@ add_nsstbl() {
   BURST100=$((BURST / 10))
   BURST200=$((BURST * 3 / 10))
 
+  if [ $BURST100 -lt $MTU ]; then
+    BURST100=$MTU
+  fi
+
   $TC qdisc add dev $IF root handle 1: nsstbl rate "${SPEED}"kbit burst "$BURST" mtu "$MTU" accel_mode 0
   $TC qdisc add dev $IF parent 1: handle 10: nssprio bands 3 accel_mode 0
   $TC qdisc add dev $IF parent 10:1 handle 100: nsstbl rate "${SPEED100}"kbit burst $BURST100 accel_mode 0
