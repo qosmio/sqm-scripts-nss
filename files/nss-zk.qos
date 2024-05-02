@@ -1,14 +1,14 @@
 #!/bin/sh
-# shellcheck disable=2086,3010
+# shellcheck disable=2086,3010,1091,3043,2034
 ###############################################################################
 # nss-zk.qos (HW Accelerated Simple Traffic Shaper)
-# version 20240226
+# version 20240502
 #
 # Requires: Platform IPQ807x, iproute2, tc (or tc-tiny), kmod-qca-nss-drv-qdisc,
 # and kmod-qca-nss-drv-igs.
 #
 # Maintainer: Qosmio (https://forum.openwrt.org/u/qosmio)
-# NSS Packages Repository: https://github.com/qosmio/nss-packages (branch: NSS-12.4-K6.1)
+# NSS Packages Repository: https://github.com/qosmio/nss-packages (branch: NSS-12.4-K6.x)
 # NSS SQM Repository: https://github.com/qosmio/sqm-scripts-nss
 #
 # Derived from work by @michaelchen644 (https://forum.openwrt.org/u/michaelchen644) and
@@ -17,11 +17,14 @@
 
 . /lib/functions.sh
 
+. /lib/functions/network.sh
+
 . "$SQM_LIB_DIR"/defaults.sh
 
-DEV=ifb-nss
-
 if [ -n "${ACTION}" ] && [ -n "${INTERFACE}" ] && [ -n "${DEVICE}" ]; then
+
+  DEV="ifb@${INTERFACE}"
+
   sqm_debug "${SCRIPT}: triggered by hotplug ${ACTION} for ${INTERFACE} (${DEVICE})"
   if $TC qdisc show dev $DEV; then
     sqm_log "${SCRIPT}: TC qdisc is already installed on $DEV, not restarting to minimize the risk of crashes"
@@ -39,16 +42,24 @@ fi
 # I see bloat for the first few seconds of a load test until codel takes over and things stabilize.
 MAXQLIMIT_MS=100
 
-check_wan() {
-  local wan_ip
-  # use ubus to check for WAN IP
-  wan_ip=$(ubus call network.interface.wan status | jsonfilter -e '@["ipv4-address"][0].address')
-  if [ -z "$wan_ip" ]; then
-    sqm_debug "check_wan: NO IP on WAN. Sleeping 5 seconds..."
-    sleep 5
-    check_wan
+check_addr() {
+  local iface_addr physdev
+
+  network_get_physdev physdev "${IFACE}"
+
+  if [ "$physdev" = "wan" ]; then
+    network_get_ipaddr iface_addr "${IFACE}"
+
+    if [ -z "$iface_addr" ]; then
+      sqm_debug "check_addr: NO IP on interface $IFACE. Sleeping 5 seconds..."
+      sleep 5
+      check_addr
+    else
+      sqm_debug "check_addr: IP on interface $IFACE: $iface_addr"
+    fi
+
   else
-    sqm_debug "check_wan: IP on WAN: $wan_ip"
+    sqm_debug "check_addr: Device $IFACE is not WAN. Skipping IP check"
   fi
 }
 
@@ -142,11 +153,16 @@ add_nsstbl() {
     BURST100=$MTU
   fi
 
+  if [ $BURST200 -lt $MTU ]; then
+    BURST200=$MTU
+  fi
+
   $TC qdisc add dev $IF root handle 1: nsstbl rate "${SPEED}"kbit burst "$BURST" mtu "$MTU" accel_mode 0
   $TC qdisc add dev $IF parent 1: handle 10: nssprio bands 3 accel_mode 0
   $TC qdisc add dev $IF parent 10:1 handle 100: nsstbl rate "${SPEED100}"kbit burst $BURST100 accel_mode 0
   $TC qdisc add dev $IF parent 100: handle 1000: nsspfifo limit 100 accel_mode 0
   $TC qdisc add dev $IF parent 10:2 handle 200: nsstbl rate "${SPEED200}"kbit burst $BURST200 accel_mode 0
+  # shellcheck disable=2046
   $TC qdisc add dev $IF parent 200: handle 2000: nssred limit 100k min 30k max 80k avpkt 1k burst 55 $(get_ecn ${ECN}) probability 0.50 accel_mode 0
 
   return 0
@@ -281,11 +297,18 @@ ingress() {
 }
 
 sqm_prepare_script() {
+  if [ ! -d /sys/module/ifb ]; then
+    insmod ifb numifbs=0 2>> ${OUTPUT_TARGET} || {
+      sqm_error "Kernel module ifb failed to load"
+      return 1
+    }
+  fi
+
   for module in qca_nss_qdisc act_nssmirred; do
     if [ ! -d /sys/module/$module ]; then
       sqm_log "sqm_prepare_script: loading required kernel module: $module"
       modprobe -v $module 2>> ${OUTPUT_TARGET} || {
-        sqm_error "Kernel module failed to load"
+        sqm_error "Kernel module '$module' failed to load"
         return 1
       }
     fi
@@ -294,14 +317,25 @@ sqm_prepare_script() {
 }
 
 sqm_start() {
+  local protocol
+
   sqm_debug "sqm_start: Starting sqm_start from nss.qos"
 
   [ -n "$IFACE" ] || return
 
+  network_get_protocol protocol "$IFACE"
+
+  if [ -n "${protocol}" ] && [ "${protocol}" = "wireguard" ]; then
+    sqm_error "sqm_start: Wireguard interfaces (${IFACE}) are NOT supported by NSS"
+    return 1
+  fi
+
+  DEV="ifb@${IFACE}"
+
   # reset the iptables trace log
   ipt_log_restart
 
-  check_wan
+  check_addr
 
   sqm_prepare_script
 
@@ -334,6 +368,12 @@ sqm_start() {
 
 sqm_stop() {
 
+    [ -n "$IFACE" ] || return
+
+    DEV="ifb@${IFACE}"
+
+    sqm_log "sqm_stop: Stopping SQM on interface $IFACE ($DEV)"
+
     # Deleting from 'root' causes annoying errors in `nss_qdisc_stats_qdisc_detach`. Clean up nested rules prior to
     # deleting from root
     tc qdisc list dev $IFACE | awk '$1=="qdisc"&&$4=="parent"{print $5}' | sort -t: -k1nr,2nr | while read -r parent; do
@@ -360,6 +400,12 @@ sqm_stop() {
     $IP link set dev $DEV down
 
     $IP link del $DEV type ifb
+  fi
+
+  # shellcheck disable=2010
+  if ls /sys/devices/virtual/net | grep -q "ifb@" ; then
+    sqm_debug "Other IFB interfaces active. Not removing kernel modules"
+    return 0
   fi
 
   for module in act_nssmirred qca_nss_qdisc act_mirred ifb; do
