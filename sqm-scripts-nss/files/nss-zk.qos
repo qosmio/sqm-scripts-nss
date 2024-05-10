@@ -43,7 +43,8 @@ fi
 MAXQLIMIT_MS=100
 
 check_addr() {
-  local iface_addr physdev
+  local iface_addr physdev run_count
+  run_count=${1:-0}
 
   network_get_physdev physdev "${IFACE}"
 
@@ -51,9 +52,13 @@ check_addr() {
     network_get_ipaddr iface_addr "${IFACE}"
 
     if [ -z "$iface_addr" ]; then
-      sqm_debug "check_addr: NO IP on interface $IFACE. Sleeping 5 seconds..."
+      [ $run_count -ge 2 ] && {
+        sqm_error "check_addr: NO IP on interface $IFACE after 2 retries. Exiting..."
+        return 1
+      }
+      sqm_warn "check_addr: NO IP on interface $IFACE. Sleeping 5 seconds... Attempt $((run_count + 1))"
       sleep 5
-      check_addr
+      check_addr $((run_count + 1))
     else
       sqm_debug "check_addr: IP on interface $IFACE: $iface_addr"
     fi
@@ -335,7 +340,7 @@ sqm_start() {
   # reset the iptables trace log
   ipt_log_restart
 
-  check_addr
+  check_addr || return $?
 
   sqm_prepare_script
 
