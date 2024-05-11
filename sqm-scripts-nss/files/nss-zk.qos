@@ -125,18 +125,33 @@ get_ecn() {
   echo "$CURECN"
 }
 
-# Sets up the NSS TBL (token bucket limiter) shaper
-add_nsstbl() {
-  local IFACE SPEED BURST_US MTU ECN LOGT
+# Sets up the NSSTBL Mix-Qdisc shaper
+add_nsstbl_mix_qdisc() {
+  local IF SPEED BURST_US MTU ECN TARGET LIMIT QDISC_OPTS LOGT SPEED100 SPEED200 SPEED300 BURST100 BURST200
 
   IF=$1
   SPEED=$2
   BURST_US=$3
   MTU=$4
   ECN=$5
+  TARGET=$6
+  LIMIT=$7
+  QDISC_OPTS=$8
   LOGT="add_nsstbl $IF:"
+  SPEED100=$((SPEED / 100))
+  SPEED200=$((SPEED / 10))
 
-  sqm_debug "$LOGT interface:$IF speed:$SPEED burst:$BURST_US mtu:$MTU overhead:$OVERHEAD"
+  if [ $SPEED100 -lt 2000 ]; then
+    SPEED100=2000
+  fi
+
+  if [ $SPEED200 -lt 5000 ]; then
+    SPEED200=5000
+  fi
+
+  SPEED300=$((SPEED - SPEED100 - SPEED200))
+
+  sqm_debug "$LOGT interface:$IF speed:$SPEED burst:$BURST_US mtu:$MTU overhead:$OVERHEAD target:$TARGET limit:$LIMIT opts:$QDISC_OPTS"
 
   # BURST
   #
@@ -147,46 +162,18 @@ add_nsstbl() {
 
   BURST=$(get_burst ${MTU} ${SPEED} ${BURST_US})
   # round to nearest multiple of MTU.
-  BURST=$(echo ${BURST} | awk -v MTU=$MTU '{print sprintf("%.0f",$0/MTU)*MTU}')
+  # BURST=$(echo ${BURST} | awk -v MTU=$MTU '{print sprintf("%.0f",$0/MTU)*MTU}')
 
-  SPEED100=$((SPEED / 10))
-  SPEED200=$((SPEED * 4 / 10))
-  BURST100=$((BURST / 10))
-  BURST200=$((BURST * 3 / 10))
+  BURST100=$((BURST / 100))
+  BURST200=$((BURST / 10))
 
-  if [ $BURST100 -lt $MTU ]; then
-    BURST100=$MTU
+  if [ $BURST100 -lt 1749 ]; then
+    BURST100=1749
   fi
 
-  if [ $BURST200 -lt $MTU ]; then
-    BURST200=$MTU
+  if [ $BURST200 -lt 1749 ]; then
+    BURST200=1749
   fi
-
-  $TC qdisc add dev $IF root handle 1: nsstbl rate "${SPEED}"kbit burst "$BURST" mtu "$MTU" accel_mode 0
-  $TC qdisc add dev $IF parent 1: handle 10: nssprio bands 3 accel_mode 0
-  $TC qdisc add dev $IF parent 10:1 handle 100: nsstbl rate "${SPEED100}"kbit burst $BURST100 accel_mode 0
-  $TC qdisc add dev $IF parent 100: handle 1000: nsspfifo limit 100 accel_mode 0
-  $TC qdisc add dev $IF parent 10:2 handle 200: nsstbl rate "${SPEED200}"kbit burst $BURST200 accel_mode 0
-  # shellcheck disable=2046
-  $TC qdisc add dev $IF parent 200: handle 2000: nssred limit 100k min 30k max 80k avpkt 1k burst 55 $(get_ecn ${ECN}) probability 0.50 accel_mode 0
-
-  return 0
-}
-
-# Sets up the NSS fq_codel qdisc
-add_nssfq_codel() {
-
-  local IFACE SPEED TARGET LIMIT MTU QDISC_OPTS LOGT
-
-  IFACE=$1
-  SPEED=$2
-  TARGET=$3
-  LIMIT=$4
-  MTU=$5
-  QDISC_OPTS=$6
-  LOGT="add_nssfq_codel $IFACE:"
-
-  sqm_debug "$LOGT interface:$IFACE speed:$SPEED target:$TARGET limit:$LIMIT mtu:$MTU overhead:$OVERHEAD opts:$QDISC_OPTS"
 
   # INTERVAL
   #
@@ -218,7 +205,7 @@ add_nssfq_codel() {
 
     # at speeds <100Mb, a quantum of ~300 helps prioritize small packets
     # https://www.bufferbloat.net/projects/codel/wiki/Best_practices_for_benchmarking_Codel_and_FQ_Codel/
-    if [ ${SPEED} -lt 100000 ]; then
+    if [ ${SPEED300} -lt 100000 ]; then
       QUANTUM=$((QUANTUM /= 5))
       QUANTUM=$((QUANTUM += 1))
       sqm_debug "Interface speed is less than 100 Mb/s, lowering Codel quantum to $QUANTUM"
@@ -235,9 +222,13 @@ add_nssfq_codel() {
     QDISC_OPTS="flows 1024 ${QDISC_OPTS}"
   fi
 
-  # Add the qdisc to the interface
-  # shellcheck disable=2046
-  $TC qdisc add dev $IFACE parent 10:3 handle 300: nssfq_codel $(get_limit "$LIMIT") $(get_target "$TARGET" "$SPEED") ${QDISC_OPTS} set_default accel_mode 0
+  $TC qdisc add dev $IF root handle 1: nsstbl rate "${SPEED}"kbit burst "$BURST" mtu "$MTU" accel_mode 0
+  $TC qdisc add dev $IF parent 1: handle 10: nssprio bands 3 accel_mode 0
+  $TC qdisc add dev $IF parent 10:1 handle 100: nsstbl rate "${SPEED100}"kbit burst $BURST100 accel_mode 0
+  $TC qdisc add dev $IF parent 100: handle 1000: nsspfifo limit 100 accel_mode 0
+  $TC qdisc add dev $IF parent 10:2 handle 200: nsstbl rate "${SPEED200}"kbit burst $BURST200 accel_mode 0
+  $TC qdisc add dev $IF parent 200: handle 2000: nssred limit 100k min 8k max 24k avpkt 1k burst 55 $(get_ecn ${ECN}) probability 0.02 accel_mode 0
+  $TC qdisc add dev $IF parent 10:3 handle 300: nssfq_codel $(get_limit "$LIMIT") $(get_target "$TARGET" "$SPEED") ${QDISC_OPTS} set_default accel_mode 0
 
   return 0
 }
@@ -260,13 +251,11 @@ egress() {
   # If there's no queue limit configured, calculate one
   [ -z "$ELIMIT" ] && ELIMIT=$(calc_limit ${UPLINK} ${MTU} ${MAXQLIMIT_MS})
 
-  add_nsstbl ${IFACE} ${UPLINK} ${ESHAPER_BURST_DUR_US} ${MTU} ${EECN} || { sqm_error "egress: failed to add shaper"; return 1; }
-
-  # shellcheck disable=2153
-  add_nssfq_codel ${IFACE} ${UPLINK} ${ETARGET} ${ELIMIT} ${MTU} "${EQDISC_OPTS}" || {
-    sqm_error "egress: failed to add qdisc"
-    return 1
+  add_nsstbl_mix_qdisc ${IFACE} ${UPLINK} ${ESHAPER_BURST_DUR_US} ${MTU} ${EECN} ${ETARGET} ${ELIMIT} "${EQDISC_OPTS}" || {
+    sqm_error "egress: failed to add shaper"
+	return 1
   }
+
   return 0
 }
 
@@ -290,10 +279,7 @@ ingress() {
   $TC qdisc add dev $IFACE handle ffff: ingress
   $TC filter add dev $IFACE parent ffff: protocol all u32 match u32 0 0 action nssmirred redirect dev $DEV fromdev $IFACE
 
-  add_nsstbl ${DEV} ${DOWNLINK} ${ISHAPER_BURST_DUR_US} ${MTU} ${IECN} || { sqm_error "ingress: failed to add shaper" ; return 1; }
-
-  # shellcheck disable=2153
-  add_nssfq_codel ${DEV} ${DOWNLINK} ${ITARGET} ${ILIMIT} ${MTU} "${IQDISC_OPTS}" || {
+  add_nsstbl_mix_qdisc ${DEV} ${DOWNLINK} ${ISHAPER_BURST_DUR_US} ${MTU} ${IECN} ${ITARGET} ${ILIMIT} "${IQDISC_OPTS}" || {
     sqm_error "ingress: failed to add shaper"
     return 1
   }
