@@ -43,8 +43,6 @@ fi
 MAXQLIMIT_MS=100
 
 check_addr() {
-  local iface_addr physdev run_count
-  run_count=${1:-0}
 
   network_get_physdev physdev "${IFACE}"
 
@@ -52,19 +50,11 @@ check_addr() {
     network_get_ipaddr iface_addr "${IFACE}"
 
     if [ -z "$iface_addr" ]; then
-      [ $run_count -ge 2 ] && {
-        sqm_error "check_addr: NO IP on interface $IFACE after 2 retries. Exiting..."
-        return 1
-      }
-      sqm_warn "check_addr: NO IP on interface $IFACE. Sleeping 5 seconds... Attempt $((run_count + 1))"
-      sleep 5
-      check_addr $((run_count + 1))
+      sqm_error "check_addr: NO IP on interface $IFACE. Will wait for the next hotplug event, or manual run. Exiting..."
+      return 1
     else
       sqm_debug "check_addr: IP on interface $IFACE: $iface_addr"
     fi
-
-  else
-    sqm_debug "check_addr: Device $IFACE is not WAN. Skipping IP check"
   fi
 }
 
@@ -260,7 +250,10 @@ egress() {
   # If there's no queue limit configured, calculate one
   [ -z "$ELIMIT" ] && ELIMIT=$(calc_limit ${UPLINK} ${MTU} ${MAXQLIMIT_MS})
 
-  add_nsstbl ${IFACE} ${UPLINK} ${ESHAPER_BURST_DUR_US} ${MTU} ${EECN} || { sqm_error "egress: failed to add shaper"; return 1; }
+  add_nsstbl ${IFACE} ${UPLINK} ${ESHAPER_BURST_DUR_US} ${MTU} ${EECN} || {
+    sqm_error "egress: failed to add shaper"
+    return 1
+  }
 
   # shellcheck disable=2153
   add_nssfq_codel ${IFACE} ${UPLINK} ${ETARGET} ${ELIMIT} ${MTU} "${EQDISC_OPTS}" || {
@@ -290,7 +283,10 @@ ingress() {
   $TC qdisc add dev $IFACE handle ffff: ingress
   $TC filter add dev $IFACE parent ffff: protocol all u32 match u32 0 0 action nssmirred redirect dev $DEV fromdev $IFACE
 
-  add_nsstbl ${DEV} ${DOWNLINK} ${ISHAPER_BURST_DUR_US} ${MTU} ${IECN} || { sqm_error "ingress: failed to add shaper" ; return 1; }
+  add_nsstbl ${DEV} ${DOWNLINK} ${ISHAPER_BURST_DUR_US} ${MTU} ${IECN} || {
+    sqm_error "ingress: failed to add shaper"
+    return 1
+  }
 
   # shellcheck disable=2153
   add_nssfq_codel ${DEV} ${DOWNLINK} ${ITARGET} ${ILIMIT} ${MTU} "${IQDISC_OPTS}" || {
@@ -340,7 +336,7 @@ sqm_start() {
   # reset the iptables trace log
   ipt_log_restart
 
-  check_addr || return $?
+  check_addr || exit $?
 
   sqm_prepare_script
 
@@ -373,25 +369,25 @@ sqm_start() {
 
 sqm_stop() {
 
-    [ -n "$IFACE" ] || return
+  [ -n "$IFACE" ] || return
 
-    DEV="ifb@${IFACE}"
+  DEV="ifb@${IFACE}"
 
-    sqm_log "sqm_stop: Stopping SQM on interface $IFACE ($DEV)"
+  sqm_log "sqm_stop: Stopping SQM on interface $IFACE ($DEV)"
 
-    # Deleting from 'root' causes annoying errors in `nss_qdisc_stats_qdisc_detach`. Clean up nested rules prior to
-    # deleting from root
-    tc qdisc list dev $IFACE | awk '$1=="qdisc"&&$4=="parent"{print $5}' | sort -t: -k1nr,2nr | while read -r parent; do
-      $TC qdisc del dev $IFACE parent $parent
-    done
+  # Deleting from 'root' causes annoying errors in `nss_qdisc_stats_qdisc_detach`. Clean up nested rules prior to
+  # deleting from root
+  tc qdisc list dev $IFACE | awk '$1=="qdisc"&&$4=="parent"{print $5}' | sort -t: -k1nr,2nr | while read -r parent; do
+    $TC qdisc del dev $IFACE parent $parent
+  done
 
-    if [ "$(tc qdisc show dev $IFACE root 2>&1 | awk -F':| ' 'NR==1{print $3}')" -gt 0 ]; then
-      $TC qdisc del dev $IFACE root
-    fi
+  if [ "$(tc qdisc show dev $IFACE root 2>&1 | awk -F':| ' 'NR==1{print $3}')" -gt 0 ]; then
+    $TC qdisc del dev $IFACE root
+  fi
 
-    if tc qdisc show dev $IFACE 2>&1 | awk '$2=="ingress"{print}' | grep -q .; then
-      $TC qdisc del dev $IFACE ingress
-    fi
+  if tc qdisc show dev $IFACE 2>&1 | awk '$2=="ingress"{print}' | grep -q .; then
+    $TC qdisc del dev $IFACE ingress
+  fi
 
   if [ -r /sys/devices/virtual/net/$DEV ]; then
     tc qdisc list dev $DEV | awk '$1=="qdisc"&&$4=="parent"{print $5}' | sort -t: -k1nr,2nr | while read -r parent; do
@@ -408,7 +404,7 @@ sqm_stop() {
   fi
 
   # shellcheck disable=2010
-  if ls /sys/devices/virtual/net | grep -q "ifb@" ; then
+  if ls /sys/devices/virtual/net | grep -q "ifb@"; then
     sqm_debug "Other IFB interfaces active. Not removing kernel modules"
     return 0
   fi
