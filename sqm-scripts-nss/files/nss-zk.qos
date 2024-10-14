@@ -294,6 +294,8 @@ ingress() {
     return 1
   }
 
+  [ -r /proc/sys/net/ecm/igs_enabled ] && echo 1 > /proc/sys/net/ecm/igs_enabled
+
   return 0
 }
 
@@ -418,6 +420,8 @@ sqm_stop() {
       }
     fi
   done
+
+  [ -r /proc/sys/net/ecm/igs_enabled ] && echo 0 > /proc/sys/net/ecm/igs_enabled
 
   return 0
 }
